@@ -1,2 +1,2 @@
 # DualTranslate 
-just google Translate，no funking ai ext
+DualTranslate just uses Google Translate, there's no fucking AI extension.
