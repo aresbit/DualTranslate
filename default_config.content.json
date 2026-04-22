@@ -15,7 +15,7 @@
   "useOnlineOptions": false,
   "enableMachineTranslateTerms": false,
   "termsDomainWithSelf": false,
-  "disableOpenUpgradePage": false,
+  "disableOpenUpgradePage": true,
   "forceAutoTranslate": false,
   "popupVariant": "modern",
   "sensitiveConfig": {
@@ -398,8 +398,8 @@
     "_systemExcludeWordRegex": "\\b({word})\\b"
   },
   "popupConfig": {
-    "enableTrialPro": true,
-    "trialProShowLimit": 20
+    "enableTrialPro": false,
+    "trialProShowLimit": 0
   },
   "ignoreReportEmailRegex": "@immersivetranslate.com|privaterelay.appleid.com",
   "enableNewUserActivity": false,
@@ -754,8 +754,8 @@
     "clickType": "translate",
     "afterInstalledAt": "",
     "fixedPosition": "right",
-    "upgradeVisible": true,
-    "upgradeShowLimit": 20,
+    "upgradeVisible": false,
+    "upgradeShowLimit": 0,
     "transparency": 30
   },
   "pcFloatBall": {
@@ -792,8 +792,8 @@
     "clickType": "translate",
     "afterInstalledAt": "2023-10-28",
     "fixedPosition": "right",
-    "upgradeVisible": true,
-    "upgradeShowLimit": 20
+    "upgradeVisible": false,
+    "upgradeShowLimit": 0
   },
   "floatBallTooltipRule": {
     "mainBtnTooltipImmediateShowCount": 5,
