@@ -1,0 +1,79 @@
+{
+  "manifest_version": 3,
+  "name": "Dual Translate",
+  "description": "Bilingual web page translation, subtitle translation & PDF translation powered by Google",
+  "version": "1.0.0",
+  "default_locale": "en",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "styles/inject.css",
+        "pdf/index.html",
+        "video-subtitle/inject.js",
+        "content_main.js",
+        "default_config.json",
+        "default_config.content.json",
+        "locales.json"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>", "file:///*"],
+      "js": ["content_guard.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
+    }
+  ],
+  "commands": {
+    "toggleTranslatePage": {
+      "suggested_key": { "default": "Alt+A" },
+      "description": "Toggle translation of current page"
+    },
+    "toggleTranslateTheWholePage": {
+      "suggested_key": { "default": "Alt+W" },
+      "description": "Toggle translating the whole page"
+    },
+    "toggleOnlyTransation": {
+      "description": "Toggle only showing translation"
+    },
+    "translateInputBox": {
+      "suggested_key": { "default": "Alt+I" },
+      "description": "Translate input box text"
+    }
+  },
+  "permissions": [
+    "storage",
+    "activeTab",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "https://translate.googleapis.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "32": "icons/32.png",
+      "48": "icons/48.png",
+      "64": "icons/64.png",
+      "128": "icons/128.png",
+      "256": "icons/256.png"
+    }
+  },
+  "icons": {
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "64": "icons/64.png",
+    "128": "icons/128.png",
+    "256": "icons/256.png"
+  }
+}
