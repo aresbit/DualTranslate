@@ -1,8 +1,30 @@
 // Dual Translate - Popup Script
-// Bridges the popup UI with the extension's background and content scripts
+// Bridges the popup UI with the extension's background and content scripts.
+//
+// IMPORTANT: this extension uses a custom channel-based messaging runtime
+// (the "@webext-core/messaging"-style layer bundled in content_main.js /
+// background.js). A plain `chrome.tabs.sendMessage({method})` is silently
+// ignored by that runtime. Every message must be a wire envelope of the form:
+//
+//   { to: "<type>:<name>", from: "<type>:<name>", payload: { method, data } }
+//
+// The receiver validates `to`/`from` are strings and `payload` is an object,
+// parses `to` to find the registered subscriber, and dispatches
+// `payload.method` to its handler. The reply resolves to `{ ok, data }`.
+//
+// Verified channels:
+//   - content actions  -> "content:main"     (handler dispatches $e[method])
+//   - background config -> "background:main"  (getUserConfig / setUserConfig ...)
+// Config is persisted under chrome.storage key `fullLocalUserConfig`;
+// `setUserConfig` OVERWRITES the whole object, so we get-merge-set.
 
 (function () {
   'use strict';
+
+  // ---- Messaging constants -------------------------------------------------
+  const FROM = 'popup:main';
+  const CONTENT_TO = 'content:main';
+  const BG_TO = 'background:main';
 
   // Common Google Translate language list used by the extension
   const LANGUAGES = [
@@ -50,8 +72,6 @@
     { code: 'ca', name: 'Catalan' },
   ];
 
-  const STORAGE_KEY = 'dualTranslateConfig';
-
   // UI Elements
   const els = {
     loading: document.getElementById('loading'),
@@ -65,21 +85,113 @@
     translationMode: document.getElementById('translationMode'),
     translatePage: document.getElementById('translatePage'),
     showOriginal: document.getElementById('showOriginal'),
-    openSettings: document.getElementById('openSettings'),
   };
 
-  let config = {
-    enabled: false,
-    sourceLanguage: 'auto',
+  // Local view model. `mode` is a UI concept:
+  //   dual/translation -> real config `translationMode`
+  //   original         -> "show original" (restorePage), not a stored mode.
+  const view = {
     targetLanguage: 'en',
-    mode: 'dual', // dual | translation | original
+    sourceLanguage: 'auto',
+    mode: 'dual',
+    pageStatus: 'Original', // Original | Translated | Translating | Error
   };
 
-  // Initialize
+  // ---- Low-level transport -------------------------------------------------
+
+  async function getActiveTabId() {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    return tab && tab.id ? tab.id : null;
+  }
+
+  // Send a wire-format message to the active tab's content script.
+  async function callContent(method, data) {
+    try {
+      const tabId = await getActiveTabId();
+      if (tabId == null) return null;
+      const resp = await chrome.tabs.sendMessage(tabId, {
+        to: CONTENT_TO,
+        from: FROM,
+        payload: { method, data },
+      });
+      return unwrap(resp);
+    } catch (e) {
+      // Content script not present on this page (chrome://, store pages, etc.)
+      console.warn('[DualTranslate] callContent failed:', method, e);
+      return null;
+    }
+  }
+
+  // Send a wire-format message to the background service worker.
+  async function callBackground(method, data) {
+    try {
+      const resp = await chrome.runtime.sendMessage({
+        to: BG_TO,
+        from: FROM,
+        payload: { method, data },
+      });
+      return unwrap(resp);
+    } catch (e) {
+      console.warn('[DualTranslate] callBackground failed:', method, e);
+      return null;
+    }
+  }
+
+  // The messaging runtime wraps replies as { ok, data, errorMessage }.
+  function unwrap(resp) {
+    if (resp && typeof resp === 'object' && 'ok' in resp) {
+      return resp.ok ? resp.data : null;
+    }
+    return resp;
+  }
+
+  // ---- Config (persisted in `fullLocalUserConfig`) -------------------------
+
+  async function getUserConfig() {
+    const cfg = await callBackground('getUserConfig');
+    return cfg && typeof cfg === 'object' ? cfg : {};
+  }
+
+  // setUserConfig overwrites the whole config object, so merge first.
+  async function patchUserConfig(patch) {
+    const current = await getUserConfig();
+    const next = { ...current, ...patch };
+    await callBackground('setUserConfig', next);
+    return next;
+  }
+
+  // ---- High-level actions --------------------------------------------------
+
+  function isTranslated() {
+    return view.pageStatus === 'Translated' || view.pageStatus === 'Translating';
+  }
+
+  async function refreshPageStatus() {
+    const status = await callContent('getPageStatus');
+    if (typeof status === 'string') view.pageStatus = status;
+    return view.pageStatus;
+  }
+
+  async function doTranslate() {
+    view.pageStatus = 'Translating';
+    updateStatusUI();
+    await callContent('translatePage');
+    await refreshPageStatus();
+    updateStatusUI();
+  }
+
+  async function doRestore() {
+    await callContent('restorePage');
+    view.pageStatus = 'Original';
+    updateStatusUI();
+  }
+
+  // ---- Init ----------------------------------------------------------------
+
   async function init() {
     populateLanguages();
-    await loadConfig();
     bindEvents();
+    await loadState();
     updateUI();
     els.loading.style.display = 'none';
     els.mainContent.style.display = 'block';
@@ -92,158 +204,90 @@
       opt.textContent = lang.name;
       return opt;
     };
-
     LANGUAGES.forEach((lang) => {
-      if (lang.code !== 'auto') {
-        els.sourceLang.appendChild(createOption(lang));
-      }
+      if (lang.code !== 'auto') els.sourceLang.appendChild(createOption(lang));
       els.targetLang.appendChild(createOption(lang));
     });
   }
 
-  async function loadConfig() {
-    try {
-      const stored = await chrome.storage.local.get([STORAGE_KEY]);
-      if (stored[STORAGE_KEY]) {
-        config = { ...config, ...stored[STORAGE_KEY] };
-      }
-      // Also try to sync with extension's native config if available
-      const nativeConfig = await getExtensionConfig();
-      if (nativeConfig) {
-        if (nativeConfig.targetLanguage) config.targetLanguage = nativeConfig.targetLanguage;
-        if (nativeConfig.sourceLanguage) config.sourceLanguage = nativeConfig.sourceLanguage;
-      }
-    } catch (e) {
-      console.warn('[DualTranslate] loadConfig failed:', e);
-    }
-  }
-
-  async function saveConfig() {
-    try {
-      await chrome.storage.local.set({ [STORAGE_KEY]: config });
-    } catch (e) {
-      console.warn('[DualTranslate] saveConfig failed:', e);
-    }
-  }
-
-  async function getExtensionConfig() {
-    try {
-      const resp = await chrome.runtime.sendMessage({ method: 'getUserConfig' });
-      return resp || null;
-    } catch (e) {
-      return null;
-    }
-  }
-
-  async function setExtensionConfig(patch) {
-    try {
-      await chrome.runtime.sendMessage({ method: 'setUserConfig', data: patch });
-    } catch (e) {
-      console.warn('[DualTranslate] setExtensionConfig failed:', e);
-    }
+  async function loadState() {
+    // Pull real config + live page status in parallel.
+    const [cfg] = await Promise.all([getUserConfig(), refreshPageStatus()]);
+    if (cfg.targetLanguage) view.targetLanguage = cfg.targetLanguage;
+    if (cfg.sourceLanguage) view.sourceLanguage = cfg.sourceLanguage;
+    if (cfg.translationMode === 'translation') view.mode = 'translation';
+    else if (cfg.translationMode === 'dual') view.mode = 'dual';
   }
 
   function bindEvents() {
+    // Master on/off toggle: translate the current page or restore it.
     els.toggleTranslate.addEventListener('change', async () => {
-      config.enabled = els.toggleTranslate.checked;
-      updateStatusUI();
-      await saveConfig();
-      await sendToActiveTab({ method: 'toggleTranslatePage' });
+      if (els.toggleTranslate.checked) {
+        await doTranslate();
+      } else {
+        await doRestore();
+      }
     });
 
     els.sourceLang.addEventListener('change', async () => {
-      config.sourceLanguage = els.sourceLang.value;
-      await saveConfig();
-      await setExtensionConfig({ sourceLanguage: config.sourceLanguage });
+      view.sourceLanguage = els.sourceLang.value;
+      await patchUserConfig({ sourceLanguage: view.sourceLanguage });
+      if (isTranslated()) await doTranslate(); // re-translate with new source
     });
 
     els.targetLang.addEventListener('change', async () => {
-      config.targetLanguage = els.targetLang.value;
-      await saveConfig();
-      await setExtensionConfig({ targetLanguage: config.targetLanguage });
-      // Update context menu text
-      await updateToggleMenuText();
+      view.targetLanguage = els.targetLang.value;
+      await patchUserConfig({ targetLanguage: view.targetLanguage });
+      if (isTranslated()) await doTranslate(); // re-translate with new target
     });
 
     els.translationMode.addEventListener('change', async () => {
-      config.mode = els.translationMode.value;
-      await saveConfig();
-      const methods = {
-        dual: 'toggleTranslatePage',
-        translation: 'toggleOnlyTransation',
-        original: 'restorePage',
-      };
-      await sendToActiveTab({ method: methods[config.mode] || 'toggleTranslatePage' });
+      view.mode = els.translationMode.value;
+      if (view.mode === 'original') {
+        await doRestore();
+        return;
+      }
+      // dual | translation -> persist and apply live.
+      await patchUserConfig({ translationMode: view.mode });
+      if (isTranslated()) {
+        await callContent('switchTranslationMode', { mode: view.mode });
+      } else {
+        await doTranslate();
+      }
     });
 
     els.translatePage.addEventListener('click', async () => {
-      config.enabled = true;
-      updateStatusUI();
-      await saveConfig();
-      await sendToActiveTab({ method: 'translatePage' });
+      els.toggleTranslate.checked = true;
+      await doTranslate();
     });
 
     els.showOriginal.addEventListener('click', async () => {
-      config.enabled = false;
-      updateStatusUI();
-      await saveConfig();
-      await sendToActiveTab({ method: 'restorePage' });
+      els.toggleTranslate.checked = false;
+      await doRestore();
     });
-
-    els.openSettings.addEventListener('click', async () => {
-      try {
-        await chrome.runtime.sendMessage({
-          method: 'openOptionsPage',
-          data: { newTab: true },
-        });
-      } catch (e) {
-        // Fallback: try chrome.runtime.openOptionsPage
-        if (chrome.runtime.openOptionsPage) {
-          chrome.runtime.openOptionsPage();
-        }
-      }
-    });
-  }
-
-  async function updateToggleMenuText() {
-    try {
-      const langName = LANGUAGES.find((l) => l.code === config.targetLanguage)?.name || config.targetLanguage;
-      await chrome.runtime.sendMessage({
-        method: 'updateToggleTranslateContextMenu',
-        data: { targetLanguage: config.targetLanguage, text: langName },
-      });
-    } catch (e) {
-      // silently fail
-    }
   }
 
   function updateUI() {
-    els.toggleTranslate.checked = config.enabled;
-    els.sourceLang.value = config.sourceLanguage;
-    els.targetLang.value = config.targetLanguage;
-    els.translationMode.value = config.mode;
+    els.sourceLang.value = view.sourceLanguage;
+    els.targetLang.value = view.targetLanguage;
+    els.translationMode.value = view.mode === 'original' ? 'original' : view.mode;
+    els.toggleTranslate.checked = isTranslated();
     updateStatusUI();
   }
 
   function updateStatusUI() {
-    const active = config.enabled;
+    const status = view.pageStatus;
+    const active = isTranslated();
     els.statusBadge.className = 'status-badge ' + (active ? 'active' : 'inactive');
     els.statusDot.className = 'status-dot ' + (active ? 'active' : 'inactive');
-    els.statusText.textContent = active ? 'On' : 'Off';
-  }
-
-  async function sendToActiveTab(message) {
-    try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!tab || !tab.id) return;
-      // Try sending via chrome.tabs.sendMessage (reaches content scripts)
-      await chrome.tabs.sendMessage(tab.id, message).catch(() => {
-        // If content script is not loaded, try injecting or notify background
-        console.warn('[DualTranslate] Content script not ready on tab', tab.id);
-      });
-    } catch (e) {
-      console.warn('[DualTranslate] sendToActiveTab failed:', e);
-    }
+    const labels = {
+      Translated: 'On',
+      Translating: '...',
+      Original: 'Off',
+      Error: 'Error',
+    };
+    els.statusText.textContent = labels[status] || (active ? 'On' : 'Off');
+    els.toggleTranslate.checked = active;
   }
 
   // Start
